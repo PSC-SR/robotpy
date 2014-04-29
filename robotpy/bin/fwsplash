@@ -1,0 +1,135 @@
+#!/usr/bin/env python
+# Warn the user when upgrading board firmware.
+
+import fcntl
+import json
+import os
+import pygtk, gtk, gobject, glib
+import sys
+
+class InpMonitor(glib.Source):
+    def __init__(self, f):
+        glib.Source.__init__(self)
+
+        fd = f.fileno()
+
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL, 0)
+        flags |= os.O_NONBLOCK
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+
+        self.f = f
+        p = glib.PollFD(fd, glib.IO_IN)
+        self.pollfd = p
+        self.add_poll(p)
+        self.data = ""
+
+    def prepare(self):
+        pass
+
+    def check(self):
+        if self.pollfd.revents:
+            return True
+        return False
+
+    def dispatch(self, callback, args):
+        "Something happened"
+        self.data += self.f.read()
+
+        lines = self.data.splitlines()
+
+        if self.data[-1] == "\n":
+            self.data = ""
+        else:
+            self.data = lines[-1]
+            self.data = self.data[:-1]
+
+        for l in lines:
+            callback( json.loads(l), *args )
+
+        return True
+
+class ProgressWindow(gtk.Window):
+    def __init__(self):
+        gtk.Window.__init__(self, gtk.WINDOW_TOPLEVEL)
+        self.connect("destroy", gtk.main_quit)
+        self.set_border_width(30)
+
+        self.vbox = gtk.VBox()
+        self.add(self.vbox)
+
+        self.status = gtk.Label("")
+        self.status.set_line_wrap(True)
+        self.status.set_justify(gtk.JUSTIFY_CENTER)
+        self.vbox.pack_end(self.status)
+
+        self.bar = gtk.ProgressBar()
+        self.bar.set_pulse_step(0.02)
+        self.vbox.pack_end(self.bar)
+
+        message = gtk.Label("Updating board firmware. Do not switch anything off or unplug any cables.")
+        message.set_line_wrap(True)
+        message.set_justify(gtk.JUSTIFY_CENTER)
+        self.vbox.pack_end(message)
+
+        self.inpmon = InpMonitor(sys.stdin)
+        self.inpmon.attach()
+        self.inpmon.set_callback(self.cb)
+
+    def cb(self, data):
+        if "type" in data:
+            t = data["type"]
+            if t == "pulse":
+                self.bar.pulse()
+            elif t == "prog":
+                self.bar.set_fraction(data["fraction"])
+
+        if "msg" in data:
+            self.status.set_label(data["msg"])
+
+class PromptWindow(gtk.Window):
+    def __init__(self, progwindow):
+        gtk.Window.__init__(self, gtk.WINDOW_TOPLEVEL)
+        self.set_border_width(30)
+        self.set_default_size( 480, 272 )
+        self.progwindow = progwindow
+
+        msg = """Some of the boards in your kit need a firmware update.
+
+This update will happen shortly.  Do not turn your robot off or unplug any cables whilst it is happening.
+
+To confirm that you have read this message, and start the update, please press both of the buttons on the right of this screen."""
+        l = gtk.Label( msg )
+        l.set_line_wrap(True)
+        l.set_justify(gtk.JUSTIFY_CENTER)
+        self.add(l)
+
+        self.connect("key-press-event", self.key_press)
+        self.connect("key-release-event", self.key_release)
+
+        self.pgup_pressed = False
+        self.pgdown_pressed = False
+
+    def key_press(self, widget, event):
+        if event.keyval == gtk.keysyms.Page_Up:
+            self.pgup_pressed = True
+        elif event.keyval == gtk.keysyms.Page_Down:
+            self.pgdown_pressed = True
+
+        if self.pgup_pressed and self.pgdown_pressed:
+            # Indicate to our caller that the confirmation has happened
+            print "Confirmed"
+            sys.stdout.flush()
+            self.destroy()
+            self.progwindow.show_all()
+
+    def key_release(self, widget, event):
+        if event.keyval == gtk.keysyms.Page_Up:
+            self.pgup_pressed = False
+        elif event.keyval == gtk.keysyms.Page_Down:
+            self.pgdown_pressed = False
+
+prog = ProgressWindow()
+prompt = PromptWindow(prog)
+prompt.show_all()
+
+gtk.main()
